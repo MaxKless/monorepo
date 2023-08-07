@@ -10,7 +10,7 @@ import {
 	useContext,
 } from "solid-js"
 import type { EditorRouteParams, EditorSearchParams } from "./types.js"
-import { http, raw } from "@inlang-git/client/raw"
+import { load } from "@project-lisa/client"
 import { InlangConfig, InlangConfigModule, setupConfig } from "@inlang/core/config"
 import { initialize$import, InlangEnvironment } from "@inlang/core/environment"
 import { createStore, SetStoreFunction } from "solid-js/store"
@@ -18,16 +18,12 @@ import type * as ast from "@inlang/core/ast"
 import type { Result } from "@inlang/core/utilities"
 import type { LocalStorageSchema } from "@src/services/local-storage/index.js"
 import { getLocalStorage, useLocalStorage } from "@src/services/local-storage/index.js"
-import { createMemoryFs } from "@inlang-git/fs"
-import type { NodeishFilesystem } from "@inlang-git/fs"
-import { github } from "@src/services/github/index.js"
 import { coreUsedConfigEvent, telemetryBrowser } from "@inlang/telemetry"
 import { showToast } from "@src/components/Toast.jsx"
 import { lint, LintedResource, LintRule } from "@inlang/core/lint"
 import type { Language } from "@inlang/core/ast"
 import { publicEnv } from "@inlang/env-variables"
 import type { TourStepId } from "./components/Notification/TourHintWrapper.jsx"
-import { parseOrigin } from "@inlang/telemetry"
 import { setSearchParams } from "./helper/setSearchParams.js"
 
 export type LocalChange = {
@@ -44,21 +40,23 @@ type EditorStateSchema = {
 	 * was cloned.
 	 */
 	repositoryIsCloned: Resource<undefined | Date>
-	/**
+
+  /**
 	 * The current branch.
 	 */
 	currentBranch: Resource<string | undefined>
-	/**
+
+  /**
+  * Additional information about a repository.
+  */
+  repositoryInformation: Resource<Awaited<ReturnType<any>>>
+
+  /**
 	 * Unpushed changes in the repository.
 	 */
-	unpushedChanges: Resource<Awaited<ReturnType<typeof raw.log>>>
-	/**
-	 * Additional information about a repository provided by GitHub.
-	 */
-	githubRepositoryInformation: Resource<
-		Awaited<ReturnType<typeof github.request<"GET /repos/{owner}/{repo}">>>
-	>
-	/**
+	unpushedChanges: Resource<Awaited<ReturnType<any>>> // typeof raw.log
+
+  /**
 	 * Route parameters like `/github.com/inlang/website`.
 	 *
 	 * Utility to access the route parameters in a typesafe manner.
@@ -75,7 +73,7 @@ type EditorStateSchema = {
 	/**
 	 * Virtual filesystem
 	 */
-	fs: () => NodeishFilesystem
+	repo: () => any // NodeishFilesystem
 
 	/**
 	 * Id to filter messages
@@ -132,7 +130,6 @@ type EditorStateSchema = {
 	/**
 	 * Unpushed changes in the repository.
 	 */
-
 	localChanges: () => LocalChange[]
 	setLocalChanges: Setter<LocalChange[]>
 
@@ -187,7 +184,7 @@ export const useEditorState = () => {
 }
 
 /**
- * `<EditorStateProvider>` initializes state with a computations such resources.
+ * `<EditorStateProvider>` initializes state with a computations such as resources.
  *
  * See https://www.solidjs.com/tutorial/stores_context.
  */
@@ -202,8 +199,6 @@ export function EditorStateProvider(props: { children: JSXElement }) {
 	const routeParams = () => currentPageContext.routeParams as EditorRouteParams
 
 	const searchParams = () => currentPageContext.urlParsed.search as EditorSearchParams
-
-	const [fsChange, setFsChange] = createSignal(new Date())
 
 	const [doesInlangConfigExist, setDoesInlangConfigExist] = createSignal<boolean>(false)
 	const [lint, setLint] = createSignal<InlangConfig["lint"]>()
@@ -238,7 +233,8 @@ export function EditorStateProvider(props: { children: JSXElement }) {
 		setSearchParams({ key: "lint", value: filteredLintRules() })
 	})
 
-	const [fs, setFs] = createSignal<NodeishFilesystem>(createMemoryFs())
+  const [fsChange, setFsChange] = createSignal(new Date())
+	const [repo, setRepo] = createSignal<any>() // NodeishFilesystem
 
 	/**
 	 * The reference resource.
@@ -253,57 +249,57 @@ export function EditorStateProvider(props: { children: JSXElement }) {
 		() => {
 			// re-initialize fs on every cloneRepository call
 			// until subdirectories are supported
-			setFs(createMemoryFs())
-			return {
-				fs: fs(),
-				routeParams: currentPageContext.routeParams as EditorRouteParams,
+
+      const { repo: freshRepo, date } = cloneRepository({
+        routeParams: currentPageContext.routeParams as EditorRouteParams,
 				user: localStorage?.user,
-				setFsChange,
+				setFsChange
+      })
+
+      setRepo(freshRepo)
+
+      return {
+        date,
+        repo: freshRepo,
+				routeParams: currentPageContext.routeParams as EditorRouteParams
 			}
 		},
 		async (args) => {
-			const result = await cloneRepository(args)
 			// not blocking the execution by using the callback pattern
 			// the user does not need to wait for the response
 			// checks whether the gitOrigin corresponds to the pattern.
 
-			const gitOrigin = parseOrigin({ remotes: await getGitOrigin(args) })
+			const gitOrigin = await args.repo.getOrigin() // parseOrigin({ remotes: await getGitOrigin(args) })
 			//You must include at least one group property for a group to be visible in the "Persons & Groups" tab
 			//https://posthog.com/docs/product-analytics/group-analytics#setting-and-updating-group-properties
 			telemetryBrowser.group("repository", gitOrigin, {
 				name: gitOrigin,
 			})
-			github
-				.request("GET /repos/{owner}/{repo}", {
-					owner: args.routeParams.owner,
-					repo: args.routeParams.repository,
-				})
-				.then((response) => {
-					telemetryBrowser.group("repository", gitOrigin, {
-						visibility: response.data.private ? "Private" : "Public",
-						isFork: response.data.fork ? "Fork" : "isNotFork",
-						// parseOrgin requiers a "remote"="origing" to transform the url in the git origin
-						parentGitOrigin: response.data.parent?.git_url
-							? parseOrigin({ remotes: [{ remote: "origin", url: response.data.parent.git_url }] })
-							: "",
-					})
-					telemetryBrowser.capture("EDITOR cloned repository", {
-						owner: args.routeParams.owner,
-						repository: args.routeParams.repository,
-						userPermission: userIsCollaborator() ? "iscollaborator" : "isNotCollaborator",
-					})
-				})
-				.catch((error) => {
-					telemetryBrowser.capture("EDITOR cloned repository", {
-						owner: args.routeParams.owner,
-						repository: args.routeParams.repository,
-						errorDuringIsPrivateRequest: error,
-						userPermission: userIsCollaborator() ? "collaborator" : "contributor",
-					})
-				})
 
-			return result
-		},
+      try {
+        const { isPrivate, isFork, parent } = await args.repo.getMeta()
+
+        telemetryBrowser.group("repository", gitOrigin, {
+          visibility: isPrivate ? "Private" : "Public",
+          isFork: isFork ? "Fork" : "isNotFork",
+          parentGitOrigin: parent?.url || "",
+        })
+        telemetryBrowser.capture("EDITOR cloned repository", {
+          owner: args.routeParams.owner,
+          repository: args.routeParams.repository,
+          userPermission: userIsCollaborator() ? "iscollaborator" : "isNotCollaborator",
+        })
+      } catch (error) {
+        telemetryBrowser.capture("EDITOR cloned repository", {
+          owner: args.routeParams.owner,
+          repository: args.routeParams.repository,
+          errorDuringIsPrivateRequest: error,
+          userPermission: userIsCollaborator() ? "collaborator" : "contributor",
+        })
+      }
+
+			return args.date
+		}
 	)
 	// re-fetched if repository has been cloned
 	const [inlangConfig, setInlangConfig] = createResource(
@@ -316,7 +312,7 @@ export function EditorStateProvider(props: { children: JSXElement }) {
 				return false
 			}
 			return {
-				fs: fs(),
+				repo: repo(),
 				// BUG: this is not reactive
 				// See https://github.com/inlang/inlang/issues/838#issuecomment-1560745678
 				// we need to listen to inlang.config.js changes
@@ -387,7 +383,7 @@ export function EditorStateProvider(props: { children: JSXElement }) {
 			return false
 		}
 		return {
-			fs: fs(),
+			repo: repo(),
 			repositoryClonedTime: repositoryIsCloned()!,
 			lastPushTime: lastPush(),
 			lastPullTime: lastPullTime(),
@@ -416,11 +412,8 @@ export function EditorStateProvider(props: { children: JSXElement }) {
 		},
 		async (args) => {
 			try {
-				const response = await github.request("GET /repos/{owner}/{repo}", {
-					owner: args.routeParams.owner,
-					repo: args.routeParams.repository,
-				})
-				return response.data.private
+				const {isPrivate} = await args.repo.getMeta()
+				return isPrivate
 			} catch (error) {
 				return undefined
 			}
@@ -442,25 +435,18 @@ export function EditorStateProvider(props: { children: JSXElement }) {
 				return false
 			}
 			return {
+        repo: repo(),
 				user: localStorage?.user ?? "not logged in",
 				routeParams: currentPageContext.routeParams as EditorRouteParams,
 			}
 		},
-		async (args) => {
+		(args: any) => {
 			// user is not logged in, see the returned object above
 			if (typeof args.user === "string") {
 				return false
 			}
 			try {
-				const response = await github.request(
-					"GET /repos/{owner}/{repo}/collaborators/{username}",
-					{
-						owner: args.routeParams.owner,
-						repo: args.routeParams.repository,
-						username: args.user.username,
-					},
-				)
-				return response.status === 204 ? true : false
+				return args.repo.isCollaborator({ username: args.user.username })
 			} catch (error) {
 				// the user is not a collaborator, hence the request will fail
 				return false
@@ -468,7 +454,7 @@ export function EditorStateProvider(props: { children: JSXElement }) {
 		},
 	)
 
-	const [githubRepositoryInformation] = createResource(
+	const [repositoryInformation] = createResource(
 		() => {
 			if (
 				localStorage?.user === undefined ||
@@ -478,15 +464,12 @@ export function EditorStateProvider(props: { children: JSXElement }) {
 				return false
 			}
 			return {
+        repo: repo(),
 				user: localStorage.user,
 				routeParams: routeParams(),
 			}
 		},
-		async (args) =>
-			github.request("GET /repos/{owner}/{repo}", {
-				owner: args.routeParams.owner,
-				repo: args.routeParams.repository,
-			}),
+		async (args: any) => (await args.repo?.getMeta()) || {}
 	)
 
 	const [currentBranch] = createResource(
@@ -499,14 +482,11 @@ export function EditorStateProvider(props: { children: JSXElement }) {
 				return false
 			}
 			return {
-				fs: fs(),
+				repo: repo(),
 			}
 		},
 		async (args) => {
-			const branch = await raw.currentBranch({
-				fs: args.fs,
-				dir: "/",
-			})
+			const branch = args.repo.getMainBranch()
 			return branch ?? undefined
 		},
 	)
@@ -522,7 +502,7 @@ export function EditorStateProvider(props: { children: JSXElement }) {
 	const [maybeSyncForkOnClone] = createResource(
 		() => {
 			if (
-				(githubRepositoryInformation() && githubRepositoryInformation()?.data.fork !== true) ||
+				!repositoryInformation()?.isFork ||
 				currentBranch() === undefined ||
 				localStorage.user === undefined ||
 				// route params can be undefined if the user navigated away from the editor
@@ -535,20 +515,15 @@ export function EditorStateProvider(props: { children: JSXElement }) {
 			return {
 				branch: currentBranch()!,
 				owner: routeParams().owner,
-				repo: routeParams().repository,
-				fs: fs(),
+				repoName: routeParams().repository,
+				repo: repo(),
 				setFsChange: setFsChange,
 				user: localStorage.user,
 			}
 		},
 		async (args) => {
 			try {
-				// merge upstream
-				const response = await github.request("POST /repos/{owner}/{repo}/merge-upstream", {
-					branch: args.branch,
-					owner: args.owner,
-					repo: args.repo,
-				})
+				const response = await args.repo.mergeUpstream({ branch: args.branch })
 				if (response.data.merge_type && response.data.merge_type !== "none") {
 					showToast({
 						variant: "info",
@@ -622,7 +597,7 @@ export function EditorStateProvider(props: { children: JSXElement }) {
 					repositoryIsCloned,
 					currentBranch,
 					unpushedChanges,
-					githubRepositoryInformation,
+          repositoryInformation,
 					routeParams,
 					searchParams,
 					filteredId,
@@ -651,7 +626,7 @@ export function EditorStateProvider(props: { children: JSXElement }) {
 					userIsCollaborator,
 					repoIsPrivate,
 					setLastPush,
-					fs,
+					repo,
 					setLastPullTime,
 				} satisfies EditorStateSchema
 			}
@@ -663,28 +638,21 @@ export function EditorStateProvider(props: { children: JSXElement }) {
 
 // ------------------------------------------
 
-async function cloneRepository(args: {
-	fs: NodeishFilesystem
+function cloneRepository(args: {
 	routeParams: EditorRouteParams
 	user: LocalStorageSchema["user"]
 	setFsChange: (date: Date) => void
-}): Promise<Date | undefined> {
-	const { host, owner, repository } = args.routeParams
-	if (host === undefined || owner === undefined || repository === undefined) {
-		return undefined
+}): Promise<{date: Date | undefined, repo: any | undefined}> {
+	const { host, owner, repository: repoName } = args.routeParams
+	if (host === undefined || owner === undefined || repoName === undefined) {
+		return {}
 	}
 
+  const repo = load({
+    corsProxy: publicEnv.PUBLIC_GIT_PROXY_PATH,
+    url: `${host}/${owner}/${repoName}`,
+  })
 	// do shallow clone, get first commit and just one branch
-	await raw.clone({
-		fs: args.fs,
-		http,
-		dir: "/",
-		corsProxy: publicEnv.PUBLIC_GIT_PROXY_PATH,
-		url: `https://${host}/${owner}/${repository}`,
-		singleBranch: true,
-		depth: 1,
-	})
-
 	// fetch 100 more commits, can get more commits if needed
 	// https://isomorphic-git.org/docs/en/faq#how-to-make-a-shallow-repository-unshallow
 	// raw.fetch({
@@ -701,7 +669,8 @@ async function cloneRepository(args: {
 	// of components that depends on fs
 	const date = new Date()
 	args.setFsChange(date)
-	return date
+
+  return { repo, date }
 }
 
 export class PullException extends Error {
@@ -724,7 +693,7 @@ export class UnknownException extends Error {
  * Pushed changes and pulls right afterwards.
  */
 export async function pushChanges(args: {
-	fs: NodeishFilesystem
+	repo: any
 	routeParams: EditorRouteParams
 	user: NonNullable<LocalStorageSchema["user"]>
 	setFsChange: (date: Date) => void
@@ -736,9 +705,7 @@ export async function pushChanges(args: {
 		return [undefined, new PushException("h3ni329 Invalid route params")]
 	}
 	// stage all changes
-	const status = await raw.statusMatrix({
-		fs: args.fs,
-		dir: "/",
+	const status = await args.repo.statusMatrix({
 		filter: (f: any) =>
 			f.endsWith(".json") ||
 			f.endsWith(".po") ||
@@ -756,11 +723,10 @@ export async function pushChanges(args: {
 	)
 	// add all changes
 	for (const file of filesWithUncommittedChanges) {
-		await raw.add({ fs: args.fs, dir: "/", filepath: file[0] })
+		await args.repo.add({ filepath: file[0] })
 	}
 	// commit changes
-	await raw.commit({
-		fs: args.fs,
+	await args.repo.commit({
 		dir: "/",
 		author: {
 			name: args.user.username,
@@ -774,14 +740,9 @@ export async function pushChanges(args: {
 
 	// push changes
 	const requestArgs = {
-		fs: args.fs,
-		http,
-		dir: "/",
 		author: {
 			name: args.user.username,
-		},
-		corsProxy: publicEnv.PUBLIC_GIT_PROXY_PATH,
-		url: `https://${host}/${owner}/${repository}`,
+		}
 	}
 	try {
 		// pull changes before pushing
@@ -795,12 +756,13 @@ export async function pushChanges(args: {
 				}),
 			]
 		}
-		const push = await raw.push(requestArgs)
+		const push = await args.repo.push(requestArgs)
 		if (push.ok === false) {
 			return [undefined, new PushException("Failed to push", { cause: push.error })]
 		}
-		await raw.pull(requestArgs)
-		const time = new Date()
+		await args.repo.pull(requestArgs)
+
+    const time = new Date()
 		// triggering a rebuild of everything fs related
 		args.setFsChange(time)
 		args.setLastPush(time)
@@ -811,17 +773,17 @@ export async function pushChanges(args: {
 }
 
 async function readInlangConfig(args: {
-	fs: NodeishFilesystem
+	repo: any
 }): Promise<InlangConfig | undefined> {
 	try {
 		const env: InlangEnvironment = {
 			$import: initialize$import({
-				fs: args.fs,
+				fs: args.repo.fs,
 				fetch,
 			}),
-			$fs: args.fs,
+			$fs: args.repo.fs,
 		}
-		const file = await args.fs.readFile("./inlang.config.js", { encoding: "utf-8" })
+		const file = await args.repo.fs.readFile("./inlang.config.js", { encoding: "utf-8" })
 		const withMimeType = "data:application/javascript;base64," + btoa(file.toString())
 		const module = (await import(/* @vite-ignore */ withMimeType)) as InlangConfigModule
 		const config = setupConfig({ module, env })
@@ -863,7 +825,7 @@ async function writeResources(args: {
 }
 
 async function _unpushedChanges(args: {
-	fs: NodeishFilesystem
+	repo: any
 	repositoryClonedTime: Date
 	lastPushTime?: Date
 	lastPullTime?: Date
@@ -878,8 +840,7 @@ async function _unpushedChanges(args: {
 		.sort((a, b) => a!.getTime() - b!.getTime())
 		.at(-1)
 
-	const unpushedChanges = await raw.log({
-		fs: args.fs,
+	const unpushedChanges = await args.repo.log({
 		dir: "/",
 		since: lastRelevantEvent,
 	})
@@ -887,17 +848,13 @@ async function _unpushedChanges(args: {
 }
 
 async function pull(args: {
-	fs: NodeishFilesystem
+	repo: any
 	user: LocalStorageSchema["user"]
 	setFsChange: (date: Date) => void
 	setLastPullTime: (date: Date) => void
 }): Promise<Result<true, PullException>> {
 	try {
-		await raw.pull({
-			fs: args.fs,
-			http,
-			dir: "/",
-			corsProxy: publicEnv.PUBLIC_GIT_PROXY_PATH,
+		await args.repo.pull({
 			singleBranch: true,
 			author: {
 				name: args.user?.username,
@@ -914,16 +871,5 @@ async function pull(args: {
 		return [true, undefined]
 	} catch (error) {
 		return [undefined, error as PullException]
-	}
-}
-async function getGitOrigin(args: { fs: NodeishFilesystem }) {
-	try {
-		const remotes = await raw.listRemotes({
-			fs: args.fs,
-			dir: await raw.findRoot({ fs: args.fs, filepath: "/" }),
-		})
-		return remotes
-	} catch (e) {
-		return undefined
 	}
 }

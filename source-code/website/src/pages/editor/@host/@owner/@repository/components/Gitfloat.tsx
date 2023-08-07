@@ -18,7 +18,7 @@ import type { Resource } from "@inlang/core/ast"
 export const Gitfloat = () => {
 	const {
 		userIsCollaborator,
-		githubRepositoryInformation,
+		repositoryInformation,
 		currentBranch,
 		localChanges,
 		setLocalChanges,
@@ -27,7 +27,7 @@ export const Gitfloat = () => {
 		setFsChange,
 		setLastPush,
 		routeParams,
-		fs,
+		repo,
 		setLastPullTime,
 		tourStep,
 		inlangConfig,
@@ -45,7 +45,7 @@ export const Gitfloat = () => {
 		else if (
 			hasPushedChanges() &&
 			localChanges().length === 0 &&
-			githubRepositoryInformation()?.data.fork
+			repositoryInformation().isFork
 		) {
 			return "pullrequest"
 		}
@@ -133,7 +133,7 @@ export const Gitfloat = () => {
 
 		// commit & push
 		const [, exception] = await pushChanges({
-			fs: fs(),
+			repo: repo(),
 			routeParams: routeParams(),
 			user: localStorage.user,
 			setFsChange,
@@ -164,9 +164,9 @@ export const Gitfloat = () => {
 
 	const pullrequestUrl = () => {
 		return `https://github.com/${
-			githubRepositoryInformation()?.data.parent?.full_name
-		}/compare/${currentBranch()}...${githubRepositoryInformation()?.data.owner.login}:${
-			githubRepositoryInformation()?.data.name
+			repositoryInformation()?.parent?.fullName
+		}/compare/${currentBranch()}...${repositoryInformation()?.owner.login}:${
+			repositoryInformation()?.name
 		}:${currentBranch()}?expand=1;title=Update%20translations;body=Describe%20the%20changes%20you%20have%20conducted%20here%0A%0APreview%20the%20messages%20on%20https%3A%2F%2Finlang.com%2Fgithub.com%2F${
 			(currentPageContext.routeParams as EditorRouteParams).owner
 		}%2F${(currentPageContext.routeParams as EditorRouteParams).repository}%20.`

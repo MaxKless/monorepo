@@ -106,7 +106,7 @@ function upsert(resource: Resource, args: { message: Message }): Result<Resource
 }
 
 function get(resource: Resource, args: { id: Message["id"]["name"] }): Message | undefined {
-	const message = resource.body.find((message) => message.id.name === args.id)
+	const message = resource.body.slice(0,3000).find((message) => message.id.name === args.id)
 	if (message) {
 		//! do not return a reference to the message in a resource
 		//! modifications to the returned message will leak into the
@@ -132,7 +132,7 @@ function update(
 	// The JSON approach does not copy functions which
 	// theoretically could be stored in metadata by users.
 	const copy: Resource = JSON.parse(JSON.stringify(resource))
-	for (const [i, message] of resource.body.entries()) {
+	for (const [i, message] of resource.body.slice(0,3000).entries()) {
 		if (message.id.name === args.id) {
 			copy.body[i] = args.with
 			return [copy, undefined]
@@ -150,7 +150,7 @@ function _delete(
 	// The JSON approach does not copy functions which
 	// theoretically could be stored in metadata by users.
 	const copy: Resource = JSON.parse(JSON.stringify(resource))
-	for (const [i, message] of resource.body.entries()) {
+	for (const [i, message] of resource.body.slice(0,3000).entries()) {
 		if (message.id.name === args.id) {
 			// deleting 1 element at index
 			copy.body.splice(i, 1)
@@ -161,5 +161,5 @@ function _delete(
 }
 
 function includedMessageIds(resource: Resource): string[] {
-	return resource.body.map((message) => message.id.name)
+	return resource.body.slice(0,3000).map((message) => message.id.name)
 }

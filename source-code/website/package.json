@@ -23,8 +23,7 @@
 		"node": ">=18.0.0"
 	},
 	"dependencies": {
-		"@inlang-git/client": "*",
-		"@inlang-git/fs": "*",
+		"@project-lisa/client": "*",
 		"@inlang/core": "*",
 		"@inlang/design-system": "*",
 		"@inlang/env-variables": "*",
